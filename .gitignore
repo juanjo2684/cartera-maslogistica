@@ -1,0 +1,78 @@
+# ============================================================
+# .gitignore — Cartera +logística
+# ============================================================
+# CRÍTICO (NDA):
+#   Los archivos reales de +logística NUNCA deben subirse al repo.
+#   Solo se sube la ESTRUCTURA de carpetas (vía .gitkeep).
+# ============================================================
+
+# ----------------------------------------------------------------
+# 1. DATOS SENSIBLES BAJO NDA — no versionar bajo ninguna circunstancia
+# ----------------------------------------------------------------
+data/input/*
+data/output/*
+data/reference/*
+!data/input/.gitkeep
+!data/output/.gitkeep
+!data/reference/.gitkeep
+
+# Extensiones típicas de datos (cinturón + tirantes)
+*.xlsx
+*.xls
+*.xlsm
+*.csv
+*.tsv
+*.parquet
+*.pdf
+*.docx
+*.doc
+# Excepción: permitir documentación en docs/
+!docs/**/*.docx
+!docs/**/*.pdf
+
+# ----------------------------------------------------------------
+# 2. ENTORNOS VIRTUALES
+# ----------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# ----------------------------------------------------------------
+# 3. PYTHON — archivos generados automáticamente
+# ----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ----------------------------------------------------------------
+# 4. NOTEBOOKS — checkpoints de Jupyter
+# ----------------------------------------------------------------
+.ipynb_checkpoints/
+
+# ----------------------------------------------------------------
+# 5. EDITORES / SO
+# ----------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# ----------------------------------------------------------------
+# 6. CREDENCIALES / SECRETOS — por si acaso
+# ----------------------------------------------------------------
+.env
+.env.local
+*.key
+*.pem
+secrets.json
