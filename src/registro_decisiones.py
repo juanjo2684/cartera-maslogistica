@@ -1,0 +1,165 @@
+"""
+Registro de decisiones de la analista.
+
+Cuando la analista resuelve una excepción (AMBIGUO / NO_IDENTIFICADO /
+CLIENTE_DESCONOCIDO) en el dashboard, su decisión se guarda aquí para
+que en la siguiente corrida del pipeline se aplique automáticamente.
+
+Archivo destino: data/output/decisiones_analista.csv
+
+Cada pago se identifica por una "huella" estable (hash de descripción +
+monto + fecha), no por el id_pago posicional que cambia entre corridas.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
+
+
+RUTA_DECISIONES = Path("data/output/decisiones_analista.csv")
+
+# Columnas del registro de decisiones (contrato fijo)
+COLUMNAS = [
+    "fecha_decision",
+    "huella_pago",
+    "id_pago_origen",
+    "monto",
+    "descripcion_pago",
+    "accion",              # APLICAR_FACTURA | PENDIENTE | NO_CORRESPONDE | AGREGAR_ALIAS | CLIENTE_NUEVO
+    "factura_asignada",    # documento de la factura a la que se aplicó (o vacío)
+    "cliente_asignado",    # cliente final (útil sobre todo para AGREGAR_ALIAS)
+    "alias_origen",        # para AGREGAR_ALIAS: el texto que aparece en el extracto
+    "comentario",
+    "usuario",
+]
+
+
+def generar_huella_pago(descripcion: str, monto: float, fecha) -> str:
+    """
+    Genera una huella estable para un pago.
+
+    La idea: un mismo pago (misma descripción, mismo monto, misma fecha)
+    siempre produce la misma huella, sin importar su posición en el
+    DataFrame. Así podemos reconocerlo entre corridas distintas.
+    """
+    desc = str(descripcion).strip().upper()
+    monto_str = f"{float(monto):.2f}"
+    fecha_str = pd.Timestamp(fecha).strftime("%Y-%m-%d")
+    base = f"{desc}|{monto_str}|{fecha_str}"
+    return hashlib.sha1(base.encode("utf-8")).hexdigest()[:16]
+
+
+def _asegurar_archivo_existe(ruta: Path = RUTA_DECISIONES) -> None:
+    """Crea el CSV con encabezados si no existe."""
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    if not ruta.exists():
+        pd.DataFrame(columns=COLUMNAS).to_csv(ruta, index=False)
+
+
+def registrar_decision(
+    huella_pago: str,
+    id_pago_origen: int,
+    monto: float,
+    descripcion_pago: str,
+    accion: str,
+    factura_asignada: str = "",
+    cliente_asignado: str = "",
+    alias_origen: str = "",
+    comentario: str = "",
+    usuario: str = "analista",
+    ruta: Path = RUTA_DECISIONES,
+) -> None:
+    """Añade una fila al registro de decisiones."""
+    _asegurar_archivo_existe(ruta)
+
+    nueva_fila = {
+        "fecha_decision": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "huella_pago": huella_pago,
+        "id_pago_origen": id_pago_origen,
+        "monto": monto,
+        "descripcion_pago": descripcion_pago,
+        "accion": accion,
+        "factura_asignada": factura_asignada,
+        "cliente_asignado": cliente_asignado,
+        "alias_origen": alias_origen,
+        "comentario": comentario,
+        "usuario": usuario,
+    }
+    df = pd.read_csv(ruta)
+    df = pd.concat([df, pd.DataFrame([nueva_fila])], ignore_index=True)
+    df.to_csv(ruta, index=False)
+
+
+def cargar_decisiones(ruta: Path = RUTA_DECISIONES) -> pd.DataFrame:
+    """Carga el historial de decisiones. Si no existe, retorna DataFrame vacío."""
+    if not Path(ruta).exists():
+        return pd.DataFrame(columns=COLUMNAS)
+    return pd.read_csv(ruta)
+
+
+def ya_tiene_decision(huella_pago: str, ruta: Path = RUTA_DECISIONES) -> dict | None:
+    """
+    Retorna la última decisión para esta huella, o None si no hay.
+    Útil para consultas puntuales (ej. desde la UI).
+    """
+    df = cargar_decisiones(ruta)
+    if df.empty:
+        return None
+    match = df[df["huella_pago"] == huella_pago]
+    if match.empty:
+        return None
+    return match.iloc[-1].to_dict()
+
+
+def decisiones_por_huella(ruta: Path = RUTA_DECISIONES) -> dict[str, dict]:
+    """
+    Carga todas las decisiones y las retorna indexadas por huella_pago.
+    Si una huella tiene varias decisiones, se queda con la más reciente.
+
+    Uso principal: lookup eficiente desde el matcher cuando procesa muchos
+    pagos y no queremos leer el CSV una vez por cada uno.
+    """
+    df = cargar_decisiones(ruta)
+    if df.empty:
+        return {}
+
+    # Ordenar por fecha para que al hacer drop_duplicates se quede con la última
+    df = df.sort_values("fecha_decision").drop_duplicates(
+        subset=["huella_pago"], keep="last"
+    )
+    return {row["huella_pago"]: row.to_dict() for _, row in df.iterrows()}
+
+
+def agregar_alias(
+    alias: str,
+    cliente_real: str,
+    notas: str = "",
+    ruta: Path = Path("data/reference/alias_clientes.csv"),
+) -> None:
+    """
+    Añade un alias al catálogo. Si ya existe (mismo alias), no lo duplica.
+    """
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+
+    # Si no existe, creamos con encabezados
+    if not ruta.exists():
+        pd.DataFrame(columns=["alias", "cliente_real", "notas"]).to_csv(ruta, index=False)
+
+    df = pd.read_csv(ruta, comment="#")
+    alias_norm = str(alias).strip().upper()
+
+    # ¿Ya existe?
+    if "alias" in df.columns and alias_norm in df["alias"].astype(str).str.upper().values:
+        return  # no duplicar
+
+    nueva = pd.DataFrame([{
+        "alias": alias_norm,
+        "cliente_real": str(cliente_real).strip().upper(),
+        "notas": notas,
+    }])
+    df_out = pd.concat([df, nueva], ignore_index=True)
+    df_out.to_csv(ruta, index=False)

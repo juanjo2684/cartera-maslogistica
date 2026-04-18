@@ -16,9 +16,5 @@ numpy>=1.24
 # Lectura/escritura de Excel
 openpyxl>=3.1
 
-# (Se irán añadiendo conforme avancemos:
-#   streamlit      → app para la operadora
-#   plotly         → visualizaciones del dashboard
-#   rapidfuzz      → matching difuso por nombre/descripción
-#   python-docx    → lectura de copys de gestión
-# )
+# Dashboard del analista
+streamlit>=1.32
