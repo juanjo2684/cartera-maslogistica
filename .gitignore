@@ -76,3 +76,5 @@ Thumbs.db
 *.key
 *.pem
 secrets.json
+
+data/output/historial_pagos.csv
