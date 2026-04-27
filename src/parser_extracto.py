@@ -44,7 +44,11 @@ _COLUMNAS_CRUDAS = [
 _NUM_COLUMNAS_ESPERADAS = len(_COLUMNAS_CRUDAS)  # 10
 
 
-def parse_extracto(ruta_csv: str | Path) -> pd.DataFrame:
+def parse_extracto(
+    ruta_csv: str | Path,
+    fecha_desde: str | pd.Timestamp | None = None,
+    fecha_hasta: str | pd.Timestamp | None = None,
+) -> pd.DataFrame:
     """
     Lee el extracto bancario crudo y devuelve un DataFrame limpio.
 
@@ -52,6 +56,12 @@ def parse_extracto(ruta_csv: str | Path) -> pd.DataFrame:
     ----------
     ruta_csv : str o Path
         Ruta al archivo CSV plano del banco.
+    fecha_desde : str | pd.Timestamp | None, opcional
+        Si se provee, descarta movimientos con fecha anterior. Inclusivo.
+        Útil cuando la analista solo quiere procesar movimientos recientes
+        y dejar fuera los que ya conciliaron directamente en SAP.
+    fecha_hasta : str | pd.Timestamp | None, opcional
+        Si se provee, descarta movimientos con fecha posterior. Inclusivo.
 
     Returns
     -------
@@ -63,6 +73,10 @@ def parse_extracto(ruta_csv: str | Path) -> pd.DataFrame:
         - codigo (int)           código interno del banco
         - descripcion (str)      normalizada (strip + upper)
         - tipo_flujo (str)       "ABONO" o "CARGO"
+
+    El DataFrame retornado expone en `df.attrs["descartados_por_filtro"]`
+    el número de filas que el filtro de fechas dejó fuera (0 si no se usó
+    filtro o si todas las filas pasaron).
 
     Raises
     ------
@@ -114,7 +128,35 @@ def parse_extracto(ruta_csv: str | Path) -> pd.DataFrame:
         lambda v: "ABONO" if v > 0 else ("CARGO" if v < 0 else "NULO")
     )
 
-    # 6. Devolver solo las columnas útiles, en orden lógico.
+    # 6. Filtro de fechas opcional (Sub-paso 4 del blindaje contra duplicidad).
+    # Cuando la analista carga un extracto con un rango amplio pero ya
+    # conció parte de él directamente en SAP, este filtro evita que esos
+    # movimientos lleguen al matcher y reaparezcan como excepciones.
+    descartados_por_filtro = 0
+    if fecha_desde is not None or fecha_hasta is not None:
+        n_inicial = len(df)
+
+        # Las filas con fecha NaT no caben en ningún rango. Si el filtro
+        # está activo, las descartamos explícitamente y avisamos.
+        n_nat = df["fecha"].isna().sum()
+        if n_nat > 0:
+            print(
+                f"⚠️  parser_extracto: {n_nat} fila(s) con fecha inválida "
+                f"descartadas por estar activo el filtro de fechas."
+            )
+
+        mascara = df["fecha"].notna()
+        if fecha_desde is not None:
+            fecha_desde_ts = pd.to_datetime(fecha_desde)
+            mascara &= df["fecha"] >= fecha_desde_ts
+        if fecha_hasta is not None:
+            fecha_hasta_ts = pd.to_datetime(fecha_hasta)
+            mascara &= df["fecha"] <= fecha_hasta_ts
+
+        df = df[mascara].copy()
+        descartados_por_filtro = n_inicial - len(df)
+
+    # 7. Devolver solo las columnas útiles, en orden lógico.
     columnas_salida = [
         "cuenta",
         "fecha",
@@ -124,7 +166,9 @@ def parse_extracto(ruta_csv: str | Path) -> pd.DataFrame:
         "codigo",
         "descripcion",
     ]
-    return df[columnas_salida].reset_index(drop=True)
+    df_salida = df[columnas_salida].reset_index(drop=True)
+    df_salida.attrs["descartados_por_filtro"] = descartados_por_filtro
+    return df_salida
 
 
 if __name__ == "__main__":

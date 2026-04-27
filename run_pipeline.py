@@ -50,6 +50,13 @@ ALIAS_PATH = "data/reference/alias_clientes.csv"
 DECISIONES_PATH = "data/output/decisiones_analista.csv"
 HISTORIAL_PATH = "data/output/historial_pagos.csv"
 
+# Filtro de fechas opcional (Sub-paso 4 del blindaje contra duplicidad).
+# Si la analista ya conció parte del extracto directamente en SAP, puede
+# acotar aquí qué movimientos procesar. Formato: "YYYY-MM-DD" o None.
+# Ambos extremos son inclusivos.
+FILTRO_FECHA_DESDE: str | None = "2026-04-16"  # cambio temporal
+FILTRO_FECHA_HASTA: str | None = None
+
 # Fecha de referencia para calcular días vencidos y bandas de antigüedad.
 # Con 2026-04-16 las bandas se pueblan de forma realista sobre los datos
 # demo (que tienen facturas a distintas edades). Cambiar a None para usar
@@ -82,9 +89,29 @@ def armonizar_movimientos(df_mov: pd.DataFrame) -> pd.DataFrame:
 def run():
     # --- PASO 1 ---
     separador("PASO 1 — Parser del extracto bancario")
-    df_mov = parse_extracto(EXTRACTO_PATH)
+    df_mov = parse_extracto(
+        EXTRACTO_PATH,
+        fecha_desde=FILTRO_FECHA_DESDE,
+        fecha_hasta=FILTRO_FECHA_HASTA,
+    )
     df_mov = armonizar_movimientos(df_mov)
+
+    # Reporte del filtro de fechas (si está activo)
+    descartados = df_mov.attrs.get("descartados_por_filtro", 0)
+    if FILTRO_FECHA_DESDE is not None or FILTRO_FECHA_HASTA is not None:
+        rango_desc = (
+            f"desde {FILTRO_FECHA_DESDE or 'inicio'} "
+            f"hasta {FILTRO_FECHA_HASTA or 'fin'}"
+        )
+        print(
+            f"🗓️  Filtro de fechas activo ({rango_desc}) — "
+            f"{descartados} movimiento(s) descartado(s)."
+        )
+
     print(f"Movimientos leídos: {len(df_mov)}")
+    if len(df_mov) == 0:
+        print("⚠️  El extracto quedó vacío después del filtro. Nada que procesar.")
+        return
     print(
         f"Rango de fechas: {df_mov['fecha'].min().date()} → {df_mov['fecha'].max().date()}"
     )
