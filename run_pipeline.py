@@ -27,6 +27,11 @@ from clasificador import clasificar_movimientos
 from parser_cartera import parsear_cartera
 from matcher import matchear_pagos
 from consolidador import consolidar
+from registro_decisiones import (
+    generar_huella_pago,
+    huellas_ya_procesadas,
+    registrar_pago_procesado,
+)
 
 
 # --------------------------- CONFIGURACIÓN ---------------------------
@@ -43,6 +48,7 @@ else:
 
 ALIAS_PATH = "data/reference/alias_clientes.csv"
 DECISIONES_PATH = "data/output/decisiones_analista.csv"
+HISTORIAL_PATH = "data/output/historial_pagos.csv"
 
 # Fecha de referencia para calcular días vencidos y bandas de antigüedad.
 # Con 2026-04-16 las bandas se pueblan de forma realista sobre los datos
@@ -109,8 +115,21 @@ def run():
     pagos_cliente = df_mov[df_mov["categoria"] == "PAGO_CLIENTE"]
     print(f"Pagos de cliente a procesar: {len(pagos_cliente)}")
     df_matches = matchear_pagos(
-        df_mov, df_cart, alias_path=ALIAS_PATH, decisiones_path=DECISIONES_PATH
+        df_mov,
+        df_cart,
+        alias_path=ALIAS_PATH,
+        decisiones_path=DECISIONES_PATH,
+        historial_path=HISTORIAL_PATH,
     )
+
+    # Reporte de trazabilidad: cuántos pagos se omitieron por estar ya en el
+    # historial de corridas anteriores.
+    ya_procesados = df_matches.attrs.get("ya_procesados", 0)
+    if ya_procesados > 0:
+        print(
+            f"\n📋 Pagos ya procesados en corridas anteriores (omitidos): "
+            f"{ya_procesados}"
+        )
 
     # Reporte de trazabilidad: cuántos pagos se resolvieron con decisión previa.
     decisiones_aplicadas = df_matches.attrs.get("decisiones_previas_aplicadas", 0)
@@ -171,6 +190,63 @@ def run():
     base.to_csv("data/output/base_consolidada.csv", index=False)
     exc.to_csv("data/output/excepciones.csv", index=False)
     print("\n✅ Archivos escritos en data/output/")
+
+    # --- PASO 6: persistencia del historial de pagos procesados ---
+    # Solo los pagos resueltos con confianza (ASOCIADO) entran al historial.
+    # Las excepciones quedan fuera por contrato: si entraran, en la siguiente
+    # corrida el Paso 0 las marcaría como YA_PROCESADO y la analista nunca
+    # podría resolverlas.
+    #
+    # También evitamos duplicados: un pago que ya estaba en el historial
+    # (y por lo tanto salió como YA_PROCESADO de esta corrida) no se
+    # vuelve a registrar.
+    separador("PASO 6 — Persistencia del historial de pagos")
+    huellas_existentes = huellas_ya_procesadas(Path(HISTORIAL_PATH))
+    asociados = df_matches[df_matches["estado_match"] == "ASOCIADO"]
+
+    # Replicamos el filtrado que hace el matcher para que id_pago (que es
+    # el índice posicional dentro del subset de PAGO_CLIENTE) mapee bien.
+    # Si no replicamos esto, df_mov.loc[id_pago] podría devolver un pago a
+    # proveedor o una comisión, registrando datos basura en el historial.
+    df_pagos_cliente = (
+        df_mov[df_mov["categoria"] == "PAGO_CLIENTE"].copy().reset_index(drop=True)
+    )
+
+    nuevos = 0
+    duplicados_omitidos = 0
+    for _, fila in asociados.iterrows():
+        # id_pago es índice posicional sobre df_pagos_cliente (no sobre df_mov).
+        # La huella se calcula con descripcion_norm (que solo está en df_mov),
+        # por eso necesitamos volver al origen.
+        id_pago = fila["id_pago"]
+        pago_origen = df_pagos_cliente.iloc[id_pago]
+
+        huella = generar_huella_pago(
+            pago_origen["descripcion_norm"],
+            pago_origen["monto"],
+            pago_origen["fecha"],
+        )
+
+        if huella in huellas_existentes:
+            duplicados_omitidos += 1
+            continue
+
+        registrar_pago_procesado(
+            huella_pago=huella,
+            fecha_pago=pago_origen["fecha"],
+            monto=pago_origen["monto"],
+            descripcion_pago=pago_origen["descripcion"],
+            estado_match_inicial=fila["estado_match"],
+            metodo_match=fila["metodo_match"],
+            facturas_asociadas=fila["facturas_asociadas"],
+            ruta=Path(HISTORIAL_PATH),
+        )
+        nuevos += 1
+
+    print(
+        f"Historial actualizado: {nuevos} nuevos pagos registrados "
+        f"({duplicados_omitidos} ya estaban)."
+    )
 
 
 if __name__ == "__main__":
