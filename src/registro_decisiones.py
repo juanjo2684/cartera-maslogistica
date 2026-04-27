@@ -129,6 +129,27 @@ def ya_tiene_decision(huella_pago: str, ruta: Path = RUTA_DECISIONES) -> dict | 
     return match.iloc[-1].to_dict()
 
 
+def decisiones_por_huella(ruta: Path = RUTA_DECISIONES) -> dict[str, dict]:
+    """
+    Retorna un dict {huella_pago: ultima_decision_como_dict}.
+
+    A diferencia de ya_tiene_decision (que consulta una huella a la vez),
+    esta función carga el archivo una sola vez y retorna un índice completo,
+    pensado para que el matcher haga lookup O(1) por cada pago durante la
+    cascada — sin tener que reabrir el CSV en cada iteración.
+
+    Si una huella tiene múltiples decisiones registradas (porque la analista
+    cambió de opinión entre corridas), se conserva la más reciente.
+    """
+    df = cargar_decisiones(ruta)
+    if df.empty:
+        return {}
+    # drop_duplicates conservando la última preserva la decisión más reciente
+    # por huella (el archivo está ordenado cronológicamente por construcción).
+    df = df.drop_duplicates(subset=["huella_pago"], keep="last")
+    return {str(row["huella_pago"]): row.to_dict() for _, row in df.iterrows()}
+
+
 def agregar_alias(
     alias: str,
     cliente_real: str,
