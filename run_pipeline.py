@@ -54,7 +54,7 @@ HISTORIAL_PATH = "data/output/historial_pagos.csv"
 # Si la analista ya conció parte del extracto directamente en SAP, puede
 # acotar aquí qué movimientos procesar. Formato: "YYYY-MM-DD" o None.
 # Ambos extremos son inclusivos.
-FILTRO_FECHA_DESDE: str | None = "2026-04-16"  # cambio temporal
+FILTRO_FECHA_DESDE: str | None = None
 FILTRO_FECHA_HASTA: str | None = None
 
 # Fecha de referencia para calcular días vencidos y bandas de antigüedad.

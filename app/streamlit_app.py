@@ -40,6 +40,7 @@ st.set_page_config(
 
 RUTA_BASE = "data/output/base_consolidada.csv"
 RUTA_EXCEPCIONES = "data/output/excepciones.csv"
+RUTA_HISTORIAL = "data/output/historial_pagos.csv"
 
 
 # -----------------------------------------------------------------------------
@@ -75,6 +76,26 @@ def _parsear_lista_segura(valor):
         return list(res) if isinstance(res, (list, tuple)) else []
     except (ValueError, SyntaxError):
         return []
+
+
+@st.cache_data
+def contar_omitidos_ultima_corrida(ruta: str = RUTA_HISTORIAL) -> int:
+    """
+    Cuenta cuántos pagos se registraron en la corrida más reciente del pipeline.
+
+    El historial guarda un timestamp completo `fecha_corrida` por cada pago
+    persistido. Los pagos de una misma corrida comparten timestamp exacto,
+    así que filtrar por el máximo nos da el conteo de la última corrida.
+
+    Si el archivo no existe (primera ejecución), retorna 0.
+    """
+    if not Path(ruta).exists():
+        return 0
+    df = pd.read_csv(ruta, usecols=["fecha_corrida"])
+    if df.empty:
+        return 0
+    ultima = df["fecha_corrida"].max()
+    return int((df["fecha_corrida"] == ultima).sum())
 
 
 def formato_cop(valor) -> str:
@@ -127,6 +148,17 @@ with st.sidebar:
     except Exception:
         pass
 
+    # Indicador de pagos omitidos por estar ya conciliados en SAP
+    # (mecanismo de blindaje contra duplicidad — Sub-paso 5)
+    try:
+        n_omitidos = contar_omitidos_ultima_corrida()
+        st.caption(
+            f"📋 **Pagos omitidos (última corrida):** {n_omitidos}\n\n"
+            f"_Pagos ya conciliados en corridas anteriores._"
+        )
+    except Exception:
+        pass
+
 
 # -----------------------------------------------------------------------------
 # VISTA 1 — Estado de cartera
@@ -138,6 +170,16 @@ def render_estado_cartera():
     if base.empty:
         st.warning("No hay base consolidada. Ejecuta el pipeline primero.")
         return
+
+    # Aviso si la corrida más reciente omitió pagos por estar ya conciliados.
+    # Da contexto al KPI "Pagos aplicados", que de lo contrario podría parecer
+    # bajo cuando el historial absorbió varios pagos en corridas previas.
+    n_omitidos = contar_omitidos_ultima_corrida()
+    if n_omitidos > 0:
+        st.caption(
+            f"📋 {n_omitidos} pago(s) previamente conciliado(s) "
+            f"fueron omitidos en esta corrida."
+        )
 
     # ---------- Fila de KPIs ----------
     col1, col2, col3, col4 = st.columns(4)
