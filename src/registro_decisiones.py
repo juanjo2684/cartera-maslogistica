@@ -1,14 +1,11 @@
-"""
-Registro de decisiones de la analista.
+"""Registro de decisiones de la analista e historial de pagos procesados.
 
-Cuando la analista resuelve una excepción (AMBIGUO / NO_IDENTIFICADO /
-CLIENTE_DESCONOCIDO) en el dashboard, su decisión se guarda aquí para
-que en la siguiente corrida del pipeline se aplique automáticamente.
+Las decisiones (decisiones_analista.csv) son el "aprendizaje" del sistema:
+cuando la analista resuelve una excepción, su decisión se reaplicará en
+corridas siguientes para el mismo pago, identificado por una huella estable.
 
-Archivo destino: data/output/decisiones_analista.csv
-
-Cada pago se identifica por una "huella" estable (hash de descripción +
-monto + fecha), no por el id_pago posicional que cambia entre corridas.
+El historial (historial_pagos.csv) es el "blindaje contra duplicidad":
+los pagos ya resueltos con confianza no vuelven a entrar al matching.
 """
 
 from __future__ import annotations
@@ -19,47 +16,43 @@ from pathlib import Path
 
 import pandas as pd
 
-
 RUTA_DECISIONES = Path("data/output/decisiones_analista.csv")
 RUTA_HISTORIAL = Path("data/output/historial_pagos.csv")
 
-# Columnas del registro de decisiones (contrato fijo)
 COLUMNAS = [
     "fecha_decision",
     "huella_pago",
     "id_pago_origen",
     "monto",
     "descripcion_pago",
-    "accion",  # APLICAR_FACTURA | PENDIENTE | NO_CORRESPONDE | AGREGAR_ALIAS | CLIENTE_NUEVO
-    "factura_asignada",  # documento de la factura a la que se aplicó (o vacío)
-    "cliente_asignado",  # cliente final (útil sobre todo para AGREGAR_ALIAS)
-    "alias_origen",  # para AGREGAR_ALIAS: el texto que aparece en el extracto
+    "accion",  # APLICAR_FACTURA | PAGO_PARCIAL | PENDIENTE | NO_CORRESPONDE | AGREGAR_ALIAS | CLIENTE_NUEVO | REVERTIR
+    "factura_asignada",
+    "cliente_asignado",
+    "alias_origen",  # texto del extracto (solo para AGREGAR_ALIAS)
     "comentario",
     "usuario",
+    "estado_decision",  # ACTIVA | REVERTIDA
 ]
 
-# Columnas del historial de pagos procesados (contrato fijo).
-# Solo entran pagos resueltos con confianza (estado ASOCIADO).
 COLUMNAS_HISTORIAL = [
-    "fecha_corrida",  # timestamp de cuándo se procesó este pago
-    "huella_pago",  # identificador estable del pago
-    "fecha_pago",  # fecha real del pago según el extracto
+    "fecha_corrida",
+    "huella_pago",
+    "fecha_pago",
     "monto",
     "descripcion_pago",
-    "estado_match_inicial",  # cómo lo resolvió el matcher (ASOCIADO siempre, por contrato)
-    "metodo_match",  # exacto | acumulado | referencia | decision_analista
-    "facturas_asociadas",  # lista de documentos a los que se aplicó (string)
+    "estado_match_inicial",
+    "metodo_match",
+    "facturas_asociadas",
 ]
+
+
+# -----------------------------------------------------------------------------
+# Decisiones de la analista
+# -----------------------------------------------------------------------------
 
 
 def generar_huella_pago(descripcion: str, monto: float, fecha) -> str:
-    """
-    Genera una huella estable para un pago.
-
-    La idea: un mismo pago (misma descripción, mismo monto, misma fecha)
-    siempre produce la misma huella, sin importar su posición en el
-    DataFrame. Así podemos reconocerlo entre corridas distintas.
-    """
+    """Hash estable que identifica un pago entre corridas."""
     desc = str(descripcion).strip().upper()
     monto_str = f"{float(monto):.2f}"
     fecha_str = pd.Timestamp(fecha).strftime("%Y-%m-%d")
@@ -68,10 +61,17 @@ def generar_huella_pago(descripcion: str, monto: float, fecha) -> str:
 
 
 def _asegurar_archivo_existe(ruta: Path = RUTA_DECISIONES) -> None:
-    """Crea el CSV con encabezados si no existe."""
     ruta.parent.mkdir(parents=True, exist_ok=True)
     if not ruta.exists():
         pd.DataFrame(columns=COLUMNAS).to_csv(ruta, index=False)
+
+
+def _asegurar_columna_estado(df: pd.DataFrame) -> pd.DataFrame:
+    """Compatibilidad con CSVs anteriores a la columna estado_decision."""
+    if "estado_decision" not in df.columns:
+        df = df.copy()
+        df["estado_decision"] = "ACTIVA"
+    return df
 
 
 def registrar_decision(
@@ -85,6 +85,7 @@ def registrar_decision(
     alias_origen: str = "",
     comentario: str = "",
     usuario: str = "analista",
+    estado_decision: str = "ACTIVA",
     ruta: Path = RUTA_DECISIONES,
 ) -> None:
     """Añade una fila al registro de decisiones."""
@@ -102,52 +103,100 @@ def registrar_decision(
         "alias_origen": alias_origen,
         "comentario": comentario,
         "usuario": usuario,
+        "estado_decision": estado_decision,
     }
-    df = pd.read_csv(ruta)
+    df = _asegurar_columna_estado(pd.read_csv(ruta))
     df = pd.concat([df, pd.DataFrame([nueva_fila])], ignore_index=True)
     df.to_csv(ruta, index=False)
 
 
 def cargar_decisiones(ruta: Path = RUTA_DECISIONES) -> pd.DataFrame:
-    """Carga el historial de decisiones. Si no existe, retorna DataFrame vacío."""
     if not Path(ruta).exists():
         return pd.DataFrame(columns=COLUMNAS)
     return pd.read_csv(ruta)
 
 
 def ya_tiene_decision(huella_pago: str, ruta: Path = RUTA_DECISIONES) -> dict | None:
-    """
-    Retorna la última decisión para esta huella, o None si no hay.
-    (Se usará en la Etapa B, cuando el matcher consulte decisiones previas.)
-    """
+    """Última decisión registrada para una huella, o None."""
     df = cargar_decisiones(ruta)
     if df.empty:
         return None
     match = df[df["huella_pago"] == huella_pago]
-    if match.empty:
-        return None
-    return match.iloc[-1].to_dict()
+    return match.iloc[-1].to_dict() if not match.empty else None
 
 
 def decisiones_por_huella(ruta: Path = RUTA_DECISIONES) -> dict[str, dict]:
-    """
-    Retorna un dict {huella_pago: ultima_decision_como_dict}.
-
-    A diferencia de ya_tiene_decision (que consulta una huella a la vez),
-    esta función carga el archivo una sola vez y retorna un índice completo,
-    pensado para que el matcher haga lookup O(1) por cada pago durante la
-    cascada — sin tener que reabrir el CSV en cada iteración.
-
-    Si una huella tiene múltiples decisiones registradas (porque la analista
-    cambió de opinión entre corridas), se conserva la más reciente.
-    """
+    """Índice {huella: última_decisión_ACTIVA}. Lo consume el matcher."""
     df = cargar_decisiones(ruta)
     if df.empty:
         return {}
-    # drop_duplicates conservando la última preserva la decisión más reciente
-    # por huella (el archivo está ordenado cronológicamente por construcción).
+
+    df = _asegurar_columna_estado(df)
     df = df.drop_duplicates(subset=["huella_pago"], keep="last")
+    df = df[df["estado_decision"].astype(str).str.upper() == "ACTIVA"]
     return {str(row["huella_pago"]): row.to_dict() for _, row in df.iterrows()}
+
+
+def revertir_decision(
+    huella_pago: str,
+    motivo: str = "",
+    usuario: str = "analista",
+    ruta: Path = RUTA_DECISIONES,
+) -> bool:
+    """Marca como REVERTIDA la última decisión activa de una huella.
+
+    No borra: añade una nueva fila REVERTIR/REVERTIDA preservando los datos
+    originales. Los AGREGAR_ALIAS no se reversan por esta vía.
+    """
+    df = cargar_decisiones(ruta)
+    if df.empty:
+        return False
+
+    df = _asegurar_columna_estado(df)
+    candidatas = df[df["huella_pago"].astype(str) == str(huella_pago)]
+    if candidatas.empty:
+        return False
+
+    ultima = candidatas.iloc[-1]
+    estado = str(ultima.get("estado_decision", "ACTIVA")).upper()
+    accion = str(ultima.get("accion", "")).upper()
+
+    if estado != "ACTIVA" or accion == "AGREGAR_ALIAS":
+        return False
+
+    registrar_decision(
+        huella_pago=str(huella_pago),
+        id_pago_origen=(
+            int(ultima["id_pago_origen"])
+            if pd.notna(ultima.get("id_pago_origen"))
+            else -1
+        ),
+        monto=float(ultima["monto"]) if pd.notna(ultima.get("monto")) else 0.0,
+        descripcion_pago=str(ultima.get("descripcion_pago", "")),
+        accion="REVERTIR",
+        comentario=motivo or f"Reversión de decisión previa ({accion}).",
+        usuario=usuario,
+        estado_decision="REVERTIDA",
+        ruta=ruta,
+    )
+    return True
+
+
+def decisiones_activas_detalle(ruta: Path = RUTA_DECISIONES) -> pd.DataFrame:
+    """Decisiones ACTIVAS (más reciente por huella), ordenadas desc por fecha.
+
+    Pensada para alimentar la tabla de 'Decisiones registradas' del dashboard.
+    """
+    df = cargar_decisiones(ruta)
+    if df.empty:
+        return df
+
+    df = _asegurar_columna_estado(df)
+    df = df.drop_duplicates(subset=["huella_pago"], keep="last")
+    df = df[df["estado_decision"].astype(str).str.upper() == "ACTIVA"]
+    if "fecha_decision" in df.columns:
+        df = df.sort_values("fecha_decision", ascending=False)
+    return df.reset_index(drop=True)
 
 
 def agregar_alias(
@@ -156,12 +205,8 @@ def agregar_alias(
     notas: str = "",
     ruta: Path = Path("data/reference/alias_clientes.csv"),
 ) -> None:
-    """
-    Añade un alias al catálogo. Si ya existe (mismo alias), no lo duplica.
-    """
+    """Añade un alias al catálogo si no existe ya."""
     ruta.parent.mkdir(parents=True, exist_ok=True)
-
-    # Si no existe, creamos con encabezados
     if not ruta.exists():
         pd.DataFrame(columns=["alias", "cliente_real", "notas"]).to_csv(
             ruta, index=False
@@ -170,12 +215,11 @@ def agregar_alias(
     df = pd.read_csv(ruta, comment="#")
     alias_norm = str(alias).strip().upper()
 
-    # ¿Ya existe?
     if (
         "alias" in df.columns
         and alias_norm in df["alias"].astype(str).str.upper().values
     ):
-        return  # no duplicar
+        return
 
     nueva = pd.DataFrame(
         [
@@ -186,25 +230,15 @@ def agregar_alias(
             }
         ]
     )
-    df_out = pd.concat([df, nueva], ignore_index=True)
-    df_out.to_csv(ruta, index=False)
+    pd.concat([df, nueva], ignore_index=True).to_csv(ruta, index=False)
 
 
-# =============================================================================
+# -----------------------------------------------------------------------------
 # Historial de pagos procesados
-# =============================================================================
-# Memoria del sistema: cada pago resuelto con confianza (estado ASOCIADO) en
-# una corrida queda registrado aquí. En la siguiente corrida, el matcher
-# consulta este historial para evitar reprocesar pagos que SAP ya aplicó.
-#
-# Las excepciones NO entran al historial hasta que la analista decida sobre
-# ellas — por eso este archivo es complementario a decisiones_analista.csv,
-# no redundante.
-# =============================================================================
+# -----------------------------------------------------------------------------
 
 
 def _asegurar_historial_existe(ruta: Path = RUTA_HISTORIAL) -> None:
-    """Crea el CSV del historial con encabezados si no existe."""
     ruta.parent.mkdir(parents=True, exist_ok=True)
     if not ruta.exists():
         pd.DataFrame(columns=COLUMNAS_HISTORIAL).to_csv(ruta, index=False)
@@ -221,33 +255,17 @@ def registrar_pago_procesado(
     fecha_corrida: str | None = None,
     ruta: Path = RUTA_HISTORIAL,
 ) -> None:
-    """
-    Añade una fila al historial de pagos procesados.
-
-    Solo debe llamarse para pagos con estado ASOCIADO (resueltos con confianza).
-    Si por error llega otro estado, igual se registra — la responsabilidad de
-    filtrar está en quien orquesta (run_pipeline.py).
-
-    Parámetros:
-        huella_pago: identificador estable (sha1 truncado) del pago.
-        fecha_pago: fecha del movimiento bancario.
-        monto: valor del pago.
-        descripcion_pago: descripción tal como vino del extracto.
-        estado_match_inicial: típicamente "ASOCIADO".
-        metodo_match: cómo se resolvió (exacto, acumulado, referencia, ...).
-        facturas_asociadas: lista de documentos o string serializable.
-        fecha_corrida: timestamp de la corrida. Si es None, se usa "ahora".
-    """
+    """Añade un pago al historial. Solo debe llamarse para estado ASOCIADO."""
     _asegurar_historial_existe(ruta)
 
     if fecha_corrida is None:
         fecha_corrida = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Normalizar facturas_asociadas a string para que el CSV sea estable
-    if isinstance(facturas_asociadas, list):
-        facturas_str = str(facturas_asociadas)
-    else:
-        facturas_str = str(facturas_asociadas) if facturas_asociadas else ""
+    facturas_str = (
+        str(facturas_asociadas)
+        if isinstance(facturas_asociadas, list)
+        else (str(facturas_asociadas) if facturas_asociadas else "")
+    )
 
     nueva_fila = {
         "fecha_corrida": fecha_corrida,
@@ -266,28 +284,13 @@ def registrar_pago_procesado(
 
 
 def cargar_historial_pagos(ruta: Path = RUTA_HISTORIAL) -> pd.DataFrame:
-    """
-    Carga el historial completo de pagos procesados.
-
-    Útil para auditoría, reportes o para mostrar la bitácora en el dashboard.
-    Si no existe, retorna un DataFrame vacío con el esquema correcto.
-    """
     if not Path(ruta).exists():
         return pd.DataFrame(columns=COLUMNAS_HISTORIAL)
     return pd.read_csv(ruta)
 
 
 def huellas_ya_procesadas(ruta: Path = RUTA_HISTORIAL) -> set[str]:
-    """
-    Retorna el conjunto de huellas que ya fueron procesadas en corridas previas.
-
-    Esta es la función que consulta el matcher antes de correr la cascada:
-    si la huella del pago actual está en este set, el pago se marca como
-    YA_PROCESADO y no entra al flujo de matching ni al de excepciones.
-
-    Devolver un set (no una lista) garantiza lookup O(1) — importante cuando
-    el historial crezca con meses de uso.
-    """
+    """Conjunto de huellas ya resueltas en corridas previas (lookup O(1))."""
     if not Path(ruta).exists():
         return set()
     df = pd.read_csv(ruta, usecols=["huella_pago"])

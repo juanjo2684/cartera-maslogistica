@@ -1,16 +1,4 @@
-"""
-Orquestador del pipeline completo: de datos crudos a base consolidada.
-
-Ejecuta los 5 pasos en orden e imprime un resumen por cada uno.
-
-Notas de diseño:
-    - Este script actúa como ADAPTER entre parser_extracto (que produce
-      columnas 'valor'/'descripcion') y los módulos siguientes (que esperan
-      'monto'/'descripcion_norm'). La armonización se hace en run(), no en
-      los módulos de src/, para no tocar código ya probado.
-    - Usa os.chdir(ROOT) para que las rutas relativas funcionen sin importar
-      desde qué carpeta se ejecute el script.
-"""
+"""Orquestador del pipeline: de datos crudos a base consolidada."""
 
 import os
 import sys
@@ -33,10 +21,7 @@ from registro_decisiones import (
     registrar_pago_procesado,
 )
 
-
 # --------------------------- CONFIGURACIÓN ---------------------------
-# Interruptor simple: True usa datos reales (NDA), False usa datos demo.
-# Los datos reales deben estar en data/input/ con los nombres canónicos.
 USAR_DATOS_REALES = False
 
 if USAR_DATOS_REALES:
@@ -50,17 +35,12 @@ ALIAS_PATH = "data/reference/alias_clientes.csv"
 DECISIONES_PATH = "data/output/decisiones_analista.csv"
 HISTORIAL_PATH = "data/output/historial_pagos.csv"
 
-# Filtro de fechas opcional (Sub-paso 4 del blindaje contra duplicidad).
-# Si la analista ya conció parte del extracto directamente en SAP, puede
-# acotar aquí qué movimientos procesar. Formato: "YYYY-MM-DD" o None.
-# Ambos extremos son inclusivos.
+# Filtro de fechas opcional. Útil cuando la analista ya conció parte del
+# extracto en SAP. Inclusivo en ambos extremos. None desactiva el filtro.
 FILTRO_FECHA_DESDE: str | None = None
 FILTRO_FECHA_HASTA: str | None = None
 
-# Fecha de referencia para calcular días vencidos y bandas de antigüedad.
-# Con 2026-04-16 las bandas se pueblan de forma realista sobre los datos
-# demo (que tienen facturas a distintas edades). Cambiar a None para usar
-# la fecha del sistema.
+# Fecha de referencia para días vencidos y bandas. None = fecha actual.
 FECHA_CORTE = "2026-04-16"
 # ---------------------------------------------------------------------
 
@@ -72,22 +52,15 @@ def separador(titulo: str):
 
 
 def armonizar_movimientos(df_mov: pd.DataFrame) -> pd.DataFrame:
-    """
-    Adapter entre parser_extracto y los módulos posteriores.
-
-    El parser produce:  valor, descripcion
-    Los siguientes esperan: monto, descripcion_norm
-
-    Aquí añadimos esas columnas sin alterar las originales.
-    """
+    """Adapter: el parser produce 'valor'/'descripcion'; los siguientes esperan 'monto'/'descripcion_norm'."""
     df = df_mov.copy()
     df["monto"] = df["valor"]
-    df["descripcion_norm"] = df["descripcion"]  # ya viene en upper + strip
+    df["descripcion_norm"] = df["descripcion"]
     return df
 
 
 def run():
-    # --- PASO 1 ---
+    # -------- PASO 1 --------
     separador("PASO 1 — Parser del extracto bancario")
     df_mov = parse_extracto(
         EXTRACTO_PATH,
@@ -96,22 +69,18 @@ def run():
     )
     df_mov = armonizar_movimientos(df_mov)
 
-    # Reporte del filtro de fechas (si está activo)
     descartados = df_mov.attrs.get("descartados_por_filtro", 0)
     if FILTRO_FECHA_DESDE is not None or FILTRO_FECHA_HASTA is not None:
-        rango_desc = (
-            f"desde {FILTRO_FECHA_DESDE or 'inicio'} "
-            f"hasta {FILTRO_FECHA_HASTA or 'fin'}"
-        )
+        rango = f"desde {FILTRO_FECHA_DESDE or 'inicio'} hasta {FILTRO_FECHA_HASTA or 'fin'}"
         print(
-            f"🗓️  Filtro de fechas activo ({rango_desc}) — "
-            f"{descartados} movimiento(s) descartado(s)."
+            f"🗓️  Filtro de fechas activo ({rango}) — {descartados} movimiento(s) descartado(s)."
         )
 
     print(f"Movimientos leídos: {len(df_mov)}")
     if len(df_mov) == 0:
         print("⚠️  El extracto quedó vacío después del filtro. Nada que procesar.")
         return
+
     print(
         f"Rango de fechas: {df_mov['fecha'].min().date()} → {df_mov['fecha'].max().date()}"
     )
@@ -120,7 +89,7 @@ def run():
         df_mov[["fecha", "monto", "tipo_flujo", "descripcion"]].to_string(index=False)
     )
 
-    # --- PASO 2 ---
+    # -------- PASO 2 --------
     separador("PASO 2 — Clasificador de movimientos")
     df_mov = clasificar_movimientos(df_mov)
     print("Distribución por categoría:")
@@ -128,7 +97,7 @@ def run():
     print("\nMovimientos clasificados:")
     print(df_mov[["monto", "categoria", "descripcion"]].to_string(index=False))
 
-    # --- PASO 3 ---
+    # -------- PASO 3 --------
     separador(f"PASO 3 — Parser de cartera (fecha_corte={FECHA_CORTE})")
     df_cart = parsear_cartera(CARTERA_PATH, fecha_corte=FECHA_CORTE)
     print(f"Facturas abiertas: {len(df_cart)}")
@@ -137,7 +106,7 @@ def run():
     print("\nDistribución por banda de antigüedad:")
     print(df_cart["banda_antiguedad"].value_counts().to_string())
 
-    # --- PASO 4 ---
+    # -------- PASO 4 --------
     separador("PASO 4 — Motor de matching pago ↔ factura")
     pagos_cliente = df_mov[df_mov["categoria"] == "PAGO_CLIENTE"]
     print(f"Pagos de cliente a procesar: {len(pagos_cliente)}")
@@ -149,21 +118,16 @@ def run():
         historial_path=HISTORIAL_PATH,
     )
 
-    # Reporte de trazabilidad: cuántos pagos se omitieron por estar ya en el
-    # historial de corridas anteriores.
     ya_procesados = df_matches.attrs.get("ya_procesados", 0)
     if ya_procesados > 0:
         print(
-            f"\n📋 Pagos ya procesados en corridas anteriores (omitidos): "
-            f"{ya_procesados}"
+            f"\n📋 Pagos ya procesados en corridas anteriores (omitidos): {ya_procesados}"
         )
 
-    # Reporte de trazabilidad: cuántos pagos se resolvieron con decisión previa.
     decisiones_aplicadas = df_matches.attrs.get("decisiones_previas_aplicadas", 0)
     if decisiones_aplicadas > 0:
         print(
-            f"\n🔄 Decisiones previas de la analista aplicadas automáticamente: "
-            f"{decisiones_aplicadas}"
+            f"\n🔄 Decisiones previas de la analista aplicadas automáticamente: {decisiones_aplicadas}"
         )
 
     print("\nResultado del matching:")
@@ -182,7 +146,7 @@ def run():
         ].to_string(index=False)
     )
 
-    # --- PASO 5 ---
+    # -------- PASO 5 --------
     separador("PASO 5 — Consolidación")
     resultado = consolidar(df_cart, df_matches)
     base = resultado["base_consolidada"]
@@ -212,29 +176,22 @@ def run():
             .to_string(index=False)
         )
 
-    # Guardar salidas
     Path("data/output").mkdir(parents=True, exist_ok=True)
     base.to_csv("data/output/base_consolidada.csv", index=False)
     exc.to_csv("data/output/excepciones.csv", index=False)
     print("\n✅ Archivos escritos en data/output/")
 
-    # --- PASO 6: persistencia del historial de pagos procesados ---
-    # Solo los pagos resueltos con confianza (ASOCIADO) entran al historial.
-    # Las excepciones quedan fuera por contrato: si entraran, en la siguiente
-    # corrida el Paso 0 las marcaría como YA_PROCESADO y la analista nunca
-    # podría resolverlas.
-    #
-    # También evitamos duplicados: un pago que ya estaba en el historial
-    # (y por lo tanto salió como YA_PROCESADO de esta corrida) no se
-    # vuelve a registrar.
+    # -------- PASO 6: persistencia del historial --------
+    # Solo entran ASOCIADOS al historial. Las excepciones quedan fuera por
+    # contrato; si entraran, en la próxima corrida saldrían como YA_PROCESADO
+    # y la analista no podría resolverlas nunca.
     separador("PASO 6 — Persistencia del historial de pagos")
     huellas_existentes = huellas_ya_procesadas(Path(HISTORIAL_PATH))
     asociados = df_matches[df_matches["estado_match"] == "ASOCIADO"]
 
-    # Replicamos el filtrado que hace el matcher para que id_pago (que es
-    # el índice posicional dentro del subset de PAGO_CLIENTE) mapee bien.
-    # Si no replicamos esto, df_mov.loc[id_pago] podría devolver un pago a
-    # proveedor o una comisión, registrando datos basura en el historial.
+    # Replicamos el filtro del matcher: id_pago es índice posicional sobre
+    # el subset de PAGO_CLIENTE, no sobre df_mov. Sin esto, df_mov.iloc[id_pago]
+    # devolvería un movimiento equivocado.
     df_pagos_cliente = (
         df_mov[df_mov["categoria"] == "PAGO_CLIENTE"].copy().reset_index(drop=True)
     )
@@ -242,12 +199,7 @@ def run():
     nuevos = 0
     duplicados_omitidos = 0
     for _, fila in asociados.iterrows():
-        # id_pago es índice posicional sobre df_pagos_cliente (no sobre df_mov).
-        # La huella se calcula con descripcion_norm (que solo está en df_mov),
-        # por eso necesitamos volver al origen.
-        id_pago = fila["id_pago"]
-        pago_origen = df_pagos_cliente.iloc[id_pago]
-
+        pago_origen = df_pagos_cliente.iloc[fila["id_pago"]]
         huella = generar_huella_pago(
             pago_origen["descripcion_norm"],
             pago_origen["monto"],
@@ -271,8 +223,7 @@ def run():
         nuevos += 1
 
     print(
-        f"Historial actualizado: {nuevos} nuevos pagos registrados "
-        f"({duplicados_omitidos} ya estaban)."
+        f"Historial actualizado: {nuevos} nuevos pagos registrados ({duplicados_omitidos} ya estaban)."
     )
 
 
