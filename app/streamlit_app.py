@@ -16,6 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)
 
 import altair as alt
@@ -31,6 +32,7 @@ from registro_decisiones import (
     revertir_decision,
 )
 from plantillas_correos import construir_correo
+from run_pipeline import run as ejecutar_pipeline
 
 st.set_page_config(page_title="Cartera +logística", page_icon="💼", layout="wide")
 
@@ -77,14 +79,20 @@ def _parsear_lista_segura(valor):
 
 @st.cache_data
 def contar_omitidos_ultima_corrida(ruta: str = RUTA_HISTORIAL) -> int:
-    """Pagos persistidos en la corrida más reciente (todos comparten timestamp)."""
+    """Pagos del historial que vienen de corridas ANTERIORES a la actual.
+
+    Estos son los que el matcher omitió en esta corrida porque su huella
+    ya estaba registrada como YA_PROCESADO. Excluye los pagos recién
+    persistidos en la corrida vigente, que no son omisiones sino registros
+    nuevos.
+    """
     if not Path(ruta).exists():
         return 0
     df = pd.read_csv(ruta, usecols=["fecha_corrida"])
     if df.empty:
         return 0
     ultima = df["fecha_corrida"].max()
-    return int((df["fecha_corrida"] == ultima).sum())
+    return int((df["fecha_corrida"] != ultima).sum())
 
 
 def formato_cop(valor) -> str:
@@ -155,9 +163,67 @@ with st.sidebar:
 
     st.divider()
 
-    if st.button("🔄 Recargar datos", use_container_width=True):
+    # ---- Procesar nueva corrida desde el dashboard ----
+    with st.expander("⚙️ Procesar nueva corrida", expanded=False):
+        st.caption(
+            "Sube el extracto bancario y la cartera SAP, "
+            "luego ejecuta la corrida sin salir del dashboard."
+        )
+
+        archivo_extracto = st.file_uploader(
+            "Extracto bancario (.csv)",
+            type=["csv"],
+            key="upload_extracto",
+        )
+        archivo_cartera = st.file_uploader(
+            "Cartera SAP (.xlsx)",
+            type=["xlsx"],
+            key="upload_cartera",
+        )
+
+        if st.button(
+            "▶️ Ejecutar corrida",
+            use_container_width=True,
+            disabled=not (archivo_extracto and archivo_cartera),
+        ):
+            try:
+                # Guardar los archivos subidos en data/input/ con los nombres
+                # que run_pipeline.py espera por configuración, sin importar
+                # cómo se llamen los archivos al subirlos.
+                from run_pipeline import EXTRACTO_PATH, CARTERA_PATH
+
+                Path("data/input").mkdir(parents=True, exist_ok=True)
+                ruta_extracto = Path(EXTRACTO_PATH)
+                ruta_cartera = Path(CARTERA_PATH)
+
+                with open(ruta_extracto, "wb") as f:
+                    f.write(archivo_extracto.getbuffer())
+                with open(ruta_cartera, "wb") as f:
+                    f.write(archivo_cartera.getbuffer())
+
+                with st.spinner("Procesando... esto toma unos segundos."):
+                    ejecutar_pipeline()
+
+                st.cache_data.clear()
+                st.success("✅ Corrida ejecutada. Recargando datos…")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Falló la corrida: {e}")
+                st.caption(
+                    "Revisa que los archivos tengan la estructura esperada "
+                    "(extracto Bancolombia de 10 columnas sin headers; "
+                    "cartera SAP con columnas estándar)."
+                )
+
+    st.divider()
+
+    if st.button("🔄 Refrescar vista", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
+    st.caption(
+        "_Refresca el dashboard sin reprocesar. Para procesar nuevos archivos, "
+        "usa **⚙️ Procesar nueva corrida**._"
+    )
 
     st.divider()
 
@@ -634,10 +700,12 @@ def _opciones_cliente_desconocido(exc: pd.Series, base: pd.DataFrame):
         clientes_existentes = sorted(base["cliente"].dropna().unique().tolist())
         cliente_real = st.selectbox(
             "Cliente real (de la cartera):",
-            clientes_existentes,
+            ["— Selecciona un cliente —"] + clientes_existentes,
             key=f"sel_cliente_{exc['id_pago']}",
         )
-        datos["cliente_asignado"] = cliente_real
+        datos["cliente_asignado"] = (
+            cliente_real if not cliente_real.startswith("—") else ""
+        )
         datos["alias_origen"] = str(exc["descripcion"]).strip().upper()
         return "AGREGAR_ALIAS", datos
 
@@ -649,6 +717,10 @@ def _opciones_cliente_desconocido(exc: pd.Series, base: pd.DataFrame):
 
 def _procesar_decision(huella, id_pago, monto, descripcion, accion, datos, comentario):
     """Persiste la decisión y, si aplica, también el alias en el catálogo."""
+    if accion == "AGREGAR_ALIAS" and not datos.get("cliente_asignado"):
+        st.error("❌ Debes seleccionar un cliente real antes de guardar.")
+        return
+
     registrar_decision(
         huella_pago=huella,
         id_pago_origen=id_pago,

@@ -36,7 +36,7 @@ def parse_extracto(
     """Devuelve un DataFrame limpio y tipado del extracto.
 
     El filtro de fechas es opcional y permite excluir movimientos que la
-    analista ya conció directamente en SAP. Ambos extremos son inclusivos.
+    analista ya concilió directamente en SAP. Ambos extremos son inclusivos.
     Expone en df.attrs["descartados_por_filtro"] cuántas filas dejó fuera.
     """
     ruta = Path(ruta_csv)
